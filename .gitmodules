@@ -1,0 +1,9 @@
+[submodule "chat2api"]
+	path = chat2api
+	url = https://github.com/LanQian528/chat2api.git
+[submodule "chatgpt2api-bk"]
+	path = chatgpt2api-bk
+	url = https://github.com/basketikun/chatgpt2api.git
+[submodule "image-gen-demo"]
+	path = image-gen-demo
+	url = https://github.com/wujiangcai/gpt-image.git
