@@ -3,13 +3,13 @@
 # chatgpt2api-bk · 一键部署 / 更新脚本（基于 git）
 #
 # 设计目标：把"项目地址（git URL）"变成可重复的部署/更新动作。
-#   - 部署：服务器上 git clone 一次 image 仓库（含子模块）
+#   - 部署：服务器上 git clone 一次 image 仓库（含四个子模块，含 blackcat-relogin-dev）
 #   - 更新：每次只要跑 ./deploy.sh update，就会拉最新代码 + 重建镜像
 #
 # 关键前提（务必先看 deploy/personal/README.md 第 2 节）：
-#   chatgpt2api-bk 目前没有自己的 GitHub 仓库，必须先在 GitHub Fork
-#   basketikun/chatgpt2api，并把本地二开推上去。否则服务器拿到的只是
-#   上游干净版（da5e0b42），不含你的二开代码。
+#   chatgpt2api-bk 已是你的 fork（wujiangcai/chatgpt2api-bk），本地二开已推上。
+#   blackcat-relogin-dev 是第4个子模块（wujiangcai/blackcat-relogin-dev），用于自动补号/重登，
+#   随父仓库一起 clone，无需单独在 VPS 放 /opt/blackcat-relogin-dev。
 #
 # 用法：
 #   部署/更新：  ./deploy.sh update
@@ -28,6 +28,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$HERE/../.." && pwd)"          # image 仓库根
 BK_DIR="$REPO_DIR/chatgpt2api-bk"
 PROD_DIR="$BK_DIR/deploy/production"
+BLACKCAT_DIR="$REPO_DIR/blackcat-relogin-dev"   # 第4个子模块：自动补号/重登
 
 GIT_URL="${GIT_URL:-https://github.com/wujiangcai/image.git}"
 BK_FORK_URL="${BK_FORK_URL:-}"
@@ -58,9 +59,22 @@ case "$CMD" in
     echo "==> 拉取 image 父仓库最新代码"
     git -C "$REPO_DIR" pull --ff-only
 
-    echo "==> 更新子模块（含 bk 二开）"
+    echo "==> 更新子模块（含 bk 二开 + blackcat-relogin-dev）"
     ensure_fork
     git -C "$REPO_DIR" submodule update --init --remote --recursive
+
+    echo "==> 确保 blackcat-relogin-dev 依赖就绪（自动补号/重登用）"
+    if [ -d "$BLACKCAT_DIR" ]; then
+      ( cd "$BLACKCAT_DIR" && npm install --no-audit --no-fund >/dev/null 2>&1 \
+        && echo "OK: blackcat npm 依赖已就绪" ) \
+        || echo "!! blackcat npm install 失败，请手动: cd $BLACKCAT_DIR && npm install"
+      # Playwright 浏览器只需装一次（需 root + apt）；失败不阻断主流程
+      ( cd "$BLACKCAT_DIR" && npx playwright install chromium >/dev/null 2>&1 \
+        && echo "OK: playwright chromium 已就绪" ) \
+        || echo "!! 若需浏览器兜底，请手动: cd $BLACKCAT_DIR && npx playwright install --with-deps chromium"
+    else
+      echo "!! 未找到 $BLACKCAT_DIR（blackcat 子模块未初始化？），跳过依赖安装"
+    fi
 
     echo "==> 构建并重启 bk（生产 compose）"
     cd "$PROD_DIR"

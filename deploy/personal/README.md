@@ -25,6 +25,9 @@ STORAGE_BACKEND=json .venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0
 **Q3：bk 现在没有自己的 GitHub 仓库，怎么办？要新建吗？**
 **不要建空白仓库，要 Fork。** 详见 §2。一句话：在 GitHub 上 Fork `basketikun/chatgpt2api` → 把本地二开推上去 → 父仓库子模块指向你的 fork。这样服务器 `docker compose up --build` 才会编进你的二开（生产 compose 是 `build: context: ../..`，从本地源码构建）。
 
+**Q4：blackcat-relogin-dev 又是什么？它也算进这个集合吗？**
+**算，它现在是 image 的第4个子模块。** blackcat 负责"自动补号/重登"：定时用邮箱 OTP 重新登录 ChatGPT、刷出新的 `access_token`，再由桥接脚本推进 `chatgpt2api-bk` 的账号池（旧删新加防重复），实现账号池自动续命。详见 §6。你已选定把它作为第4个子模块纳入 image 集合（与 bk / image-gen-demo / chat2api 并列）。
+
 ---
 
 ## 1. 架构（单机全栈）
@@ -83,9 +86,30 @@ git push
 ```
 > 做过 ③ 后，服务器 clone 时子模块就直接是 fork；没做 ③ 也行，但服务器跑 `deploy.sh` 时必须带 `BK_FORK_URL=...`（见 §3.7）。
 
-**④（可选）image-gen-demo / chat2api**
+**④ blackcat-relogin-dev（第4个子模块，自动补号/重登）**
+不是 Fork，是你自己的新仓库：
+1. GitHub **新建**空仓库 `blackcat-relogin-dev`（不要勾选 README / .gitignore / License，我们已自带）。
+2. 本地推送（已跟踪文件无密钥，安全）：
+   ```bash
+   cd blackcat-relogin-dev
+   git remote add origin https://github.com/<你的名>/blackcat-relogin-dev.git
+   git push -u origin main
+   ```
+3. 注册为 image 第4个子模块，并让父仓库记录（见 ⑤）。
+
+**⑤（可选）image-gen-demo / chat2api**
 - `image-gen-demo` 你已有 `wujiangcai/gpt-image`，直接推。
 - `chat2api` 是别人的仓库，你没改，**保持引用上游即可，不要推**。
+
+**⑥ 把 blackcat 注册为 image 的第4个子模块**
+```bash
+cd image
+git submodule add https://github.com/<你的名>/blackcat-relogin-dev.git blackcat-relogin-dev
+git add .gitmodules blackcat-relogin-dev
+git commit -m "chore: add blackcat-relogin-dev as 4th submodule (auto relogin)"
+git push
+```
+> 注册后，`deploy.sh update` 会一并拉取 blackcat 最新代码；`refresh-and-sync.sh` 会自动定位它（无需手改路径）。
 
 ---
 
@@ -96,7 +120,7 @@ git push
 
 **方式 A（推荐，git 驱动）—— 贴项目地址就能部署/更新**
 ```bash
-# 在服务器上，克隆 image 父仓库（含三个子模块）
+# 在服务器上，克隆 image 父仓库（含四个子模块，含 blackcat-relogin-dev）
 git clone --recurse-submodules https://github.com/<你的名>/image.git /opt/image
 cd /opt/image
 # 若父仓库 .gitmodules 已指向你的 fork（做过 §2③），直接：
@@ -109,7 +133,7 @@ BK_FORK_URL=https://github.com/<你的名>/chatgpt2api-bk.git ./deploy/personal/
 ```bash
 # 把整个 image 仓库（含子模块）传到 /opt/image，例如：
 scp -r /c/Users/caiwujiang/Desktop/image root@<服务器IP>:/opt/image
-# 或分别 git clone 三个子模块到对应目录
+# 或分别 git clone 四个子模块到对应目录
 ```
 
 ### 3.2 写配置
@@ -220,30 +244,31 @@ docker compose --env-file .env.production exec api sh -lc \
 
 原理：image 账号池吃的是 `access_token`（短期 JWT，会过期），它自己**不会**用 session_token 续。所以由 blackcat 定时重登刷出新 token，再用桥接脚本推进账号池（旧删新加，避免重复账号）。
 
-### 6.1 在 VPS 上装 blackcat
-blackcat 是独立项目（仓库：`blackcat-relogin-dev`），传一份到 `/opt/blackcat-relogin-dev`：
+### 6.1 blackcat 已随 image 一起 clone（第4个子模块）
+blackcat-relogin-dev 现在是 image 的第4个子模块，**不用单独传**。随 `git clone --recurse-submodules` / `deploy.sh update` 自动落在 `/opt/image/blackcat-relogin-dev`：
 ```bash
-cd /opt/blackcat-relogin-dev
-npm install
-npx playwright install --with-deps chromium   # Sentinel/浏览器兜底需要
+cd /opt/image/blackcat-relogin-dev
+npm install                                   # 依赖（deploy.sh update 也会自动跑）
+npx playwright install --with-deps chromium   # Sentinel/浏览器兜底需要（一次）
 cp config.example.json config.json            # 配好接码通道（API接码或Outlook）
 # 准备 accounts.txt，格式见 blackcat README（邮箱----API链接 等）
 ```
+> `accounts.txt` / `config.json` 已被 blackcat 的 `.gitignore` 忽略，是本地运行凭据，**不进版本库**，每个 VPS 各自维护。
 
-### 6.2 放置续命脚本
-把本目录 `deploy/personal/` 整体传到 `/opt/deploy-personal/`（含 `refresh-and-sync.sh`、`blackcat-chatgpt2api-bridge.js`、`.env.personal.example`），改脚本顶部路径与 `C2A_AUTH_KEY`：
+### 6.2 续命脚本（随 image 一起，路径自动定位）
+`refresh-and-sync.sh` 与 `blackcat-chatgpt2api-bridge.js` 已经随 image 在 `/opt/image/deploy/personal/`，脚本会自动定位 `image/blackcat-relogin-dev` 子模块，**无需手改路径**。只需确认 `C2A_BASE_URL` / `C2A_AUTH_KEY` 与你部署的一致：
 ```bash
-chmod +x /opt/deploy-personal/refresh-and-sync.sh
-# 先手动干跑一遍确认无误：
-node /opt/deploy-personal/blackcat-chatgpt2api-bridge.js \
-  --save-dir /opt/blackcat-relogin-dev/codex_relogin \
+chmod +x /opt/image/deploy/personal/refresh-and-sync.sh
+# 先手动干跑一遍确认无误（save-dir 指向子模块内的 codex_relogin）：
+node /opt/image/deploy/personal/blackcat-chatgpt2api-bridge.js \
+  --save-dir /opt/image/blackcat-relogin-dev/codex_relogin \
   --base-url https://img.example.com --auth-key <你的管理员key> --dry-run
 ```
 
 ### 6.3 定时任务
 ```bash
 # crontab -e ——每 6 小时刷新一次，赶在 token 过期前续上
-0 */6 * * * /opt/deploy-personal/refresh-and-sync.sh >> /var/log/token-refresh.log 2>&1
+0 */6 * * * /opt/image/deploy/personal/refresh-and-sync.sh >> /var/log/token-refresh.log 2>&1
 ```
 
 > 现实提醒：blackcat 的 refresh 是"完整重登需要邮箱验证码"，所以**接码通道必须稳定**（API 接码不掉线 / Outlook refresh_token 不失效），这才是自动续命能不能长期跑通的关键，而不是代码本身。
@@ -293,6 +318,10 @@ git push                               # 推到你的远端
 cd chatgpt2api-bk && git add -A && git commit -m "..." && git push
 # 父仓库记录新的子模块指针：
 cd .. && git add chatgpt2api-bk && git commit -m "bump bk" && git push
+
+# 若改的是 blackcat 子模块（自动补号/重登逻辑）：
+cd blackcat-relogin-dev && git add -A && git commit -m "..." && git push
+cd .. && git add blackcat-relogin-dev && git commit -m "bump blackcat" && git push
 ```
 
 服务器更新（见 §3.7）：`./deploy/personal/deploy.sh update`
@@ -315,6 +344,7 @@ git checkout <commit>
 - **别把 5432/6379/9000 映射到公网**：个人版保持内网 expose，只暴露 Caddy 的 80/443。
 - **bridge-state.json 误提交**：已加进 `.gitignore`；若已误加，执行 `git rm --cached deploy/personal/bridge-state.json`。
 - **服务器跑的是上游干净版（不含二开）**：忘了 §2 的 Fork + 子模块指向 fork。检查 `git -C chatgpt2api-bk remote -v` 是否指向你的 fork；不是就重做 §2③ 或部署时带 `BK_FORK_URL`。
+- **blackcat 子模块是空的**：`git submodule status` 里 `blackcat-relogin-dev` 前面是 `-` 说明没拉到。先确认 GitHub 上 `wujiangcai/blackcat-relogin-dev` 已创建且已 push，再运行 `git submodule update --init --remote blackcat-relogin-dev`。
 - **本地改了 bk 但没生效**：`config.json` 被 `assume-unchanged` 保护，改它不会进提交；改源码（`api/`、`services/`、`web/`）才会随 `git push` + `deploy.sh update` 上服务器。
 
 ---
