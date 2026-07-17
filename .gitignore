@@ -1,0 +1,66 @@
+﻿# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local automation / agent state
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / frontend build
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+!.env.deploy.example
+_auth.json
+*_auth.json
+config.local.json
+secrets.*
+*.key
+*.pem
+
+# Runtime data / logs / databases
+logs/
+*.log
+data/
+c2a-data/
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+
+# OneAPI local runtime bundle; keep out of source control
+oneapi/
+
+# Binaries / archives
+*.exe
+*.dll
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
+
+# Ad-hoc local files from earlier experiments
+new 1.html
+oneapi-release.json
