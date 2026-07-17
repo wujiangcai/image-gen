@@ -1,23 +1,29 @@
 # chatgpt2api-bk · 单机个人版部署指南
 
-> 适用场景：**单台 VPS 一把梭 · 只部署 `chatgpt2api-bk` 主后端 · 个人/小圈子自用 · 顺带把 blackcat 账号刷新做成服务器上的自动续命。**
+> 适用场景：**单台 VPS 一把梭 · 主要是 `chatgpt2api-bk` 主后端 · 个人/小圈子自用 · 顺带把 blackcat 账号刷新做成服务器上的自动续命。**
 >
 > 本目录 `deploy/personal/`（位于仓库根，独立于 `chatgpt2api-bk` 子模块）是个人自用精简部署包，复用子模块内自带的 `chatgpt2api-bk/deploy/production` 生产级 compose，只是关掉了支付/邮件/对外注册。
 
 ---
 
-## 0. 一句话结论
+## 0. 先回答三个常见问题
 
-你不用从零搭。`chatgpt2api-bk/deploy/production/` 里**已经有一套生产级 docker compose**（Caddy 自动 HTTPS + FastAPI + PostgreSQL + Redis + MinIO + 健康检查 + 备份 + 上线预检 + 告警）。个人自用直接复用这套、关掉注册/支付/邮件即可——这就是"最稳"的做法。本指南把它落地成照着敲能上线的步骤，并补上账号自动续命。
+**Q1：项目是怎么启动的？bk 是后端吗？**
+**是的，`chatgpt2api-bk` 就是主后端。** 它是 FastAPI 应用（`main.py` → `create_app()`），自带：账号池、Web 管理台 UI、图片生成 API。你本地"能正常生图"就是它单独跑起来（端口 8000）的结果。本地启动方式：
+```bash
+cd chatgpt2api-bk
+STORAGE_BACKEND=json .venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
+服务器上则用它的生产 compose（Docker，见 §3），更稳定。
 
-本目录（`deploy/personal/`）包含：
+**Q2：image-gen-demo 和 chat2api 又是什么？**
+- `image-gen-demo`（子模块 `wujiangcai/gpt-image`）：一个**对外轻量前端/包装**（暴露 8080）。⚠️ 它默认的 `docker-compose.yml` 拉的是**上游已发布镜像** `ghcr.io/basketikun/chatgpt2api:latest`，**不是你本地二开的代码**。也就是说：只用 image-gen-demo 而不改它的 compose，服务器跑的是上游干净版。
+- `chat2api`（子模块 `LanQian528/chat2api`）：一个 ChatGPT→API **中继库**，你没改它（=上游）。它只在 image-gen-demo 的 "relay/chat2api 模式" 下，用来把生图 prompt 转成 chat completions。`chatgpt2api-bk` 自身**不依赖** chat2api（bk 自带 `chatgpt_service`）。
 
-| 文件 | 作用 |
-|---|---|
-| `.env.personal.example` | 精简版环境变量（占位符，可提交 git），覆盖到 `chatgpt2api-bk/deploy/production/.env.production` |
-| `blackcat-chatgpt2api-bridge.js` | token 同步桥接：读取 blackcat 的 JSON → 推送进账号池（旧删新加，避免重复账号） |
-| `refresh-and-sync.sh` | blackcat 刷新 + 同步账号池的 cron 脚本 |
-| `README.md` | 本文件 |
+**结论（个人用什么）**：直接用 `chatgpt2api-bk` 即可（已验证可生图、含账号池+管理台）。`image-gen-demo` 是可选的更友好公开 UI，**且必须改成 build 你自己的 bk fork** 才能用上你的二开（见 §10）。
+
+**Q3：bk 现在没有自己的 GitHub 仓库，怎么办？要新建吗？**
+**不要建空白仓库，要 Fork。** 详见 §2。一句话：在 GitHub 上 Fork `basketikun/chatgpt2api` → 把本地二开推上去 → 父仓库子模块指向你的 fork。这样服务器 `docker compose up --build` 才会编进你的二开（生产 compose 是 `build: context: ../..`，从本地源码构建）。
 
 ---
 
@@ -31,7 +37,7 @@
          └──────┬──────┘
                 │ 内网 :80
          ┌──────▼──────┐
-         │  api (FastAPI)  ← 图片API + 账号池 + Web管理台
+         │  api (FastAPI / chatgpt2api-bk)  ← 图片API + 账号池 + Web管理台
          └──┬───┬───┬──┘
             │   │   └────────────┐
     ┌───────▼┐ ┌▼─────┐   ┌──────▼──────┐
@@ -52,30 +58,64 @@
 
 ---
 
-## 2. 前置准备
+## 2. 把 bk 变成你自己的仓库（Fork，关键步骤）
 
-**VPS 建议规格**：2 核 / 4G 内存 / 40G 盘起步（MinIO 存图会长，盘按需加）。系统 Ubuntu 22.04+ / Debian 12。
+`chatgpt2api-bk` 目前远程是上游 `basketikun/chatgpt2api`，你的本地二开（2 个提交 `a2899b2` + `6a013bc`）**还没推到任何 GitHub 仓库**。服务器要拿到你的二开，必须先把 bk 变成你自己的仓库：
 
-安装 Docker：
+**① 在 GitHub 上 Fork**
+打开 https://github.com/basketikun/chatgpt2api → 点 Fork → 得到 `https://github.com/<你的名>/chatgpt2api-bk.git`（含上游基底 commit `da5e0b42`）。
+
+**② 本地推送二开**
 ```bash
-curl -fsSL https://get.docker.com | sh
-sudo systemctl enable --now docker
-docker compose version   # 确认 compose 插件可用
+cd chatgpt2api-bk
+git remote set-url origin https://github.com/<你的名>/chatgpt2api-bk.git
+git push -u origin main      # 推 6a013bc，auth-key 已是占位符，安全
 ```
+> 若 push 被拒（fork 默认分支名不同），按提示 `git push -u origin HEAD:<fork默认分支>`。
 
-域名（强烈建议）：把你的域名 A 记录解析到 VPS 公网 IP，例如 `img.example.com`。放行安全组/防火墙 **80、443**。
+**③ 让父仓库 image 指向你的 fork（推荐，否则别人/服务器 clone 到的还是上游）**
+```bash
+cd image
+git submodule set-url chatgpt2api-bk https://github.com/<你的名>/chatgpt2api-bk.git
+git add chatgpt2api-bk .gitmodules
+git commit -m "chore: chatgpt2api-bk 指向我的 fork"
+git push
+```
+> 做过 ③ 后，服务器 clone 时子模块就直接是 fork；没做 ③ 也行，但服务器跑 `deploy.sh` 时必须带 `BK_FORK_URL=...`（见 §3.7）。
+
+**④（可选）image-gen-demo / chat2api**
+- `image-gen-demo` 你已有 `wujiangcai/gpt-image`，直接推。
+- `chat2api` 是别人的仓库，你没改，**保持引用上游即可，不要推**。
 
 ---
 
 ## 3. 部署主后端（核心步骤）
 
-### 3.1 上传代码
-把整个 `chatgpt2api-bk` 仓库传到服务器，例如 `/opt/chatgpt2api-bk`（`git clone` 你自己的仓库，或 `scp -r`）。
+### 3.1 把代码弄到服务器
+两种方式，任选其一：
+
+**方式 A（推荐，git 驱动）—— 贴项目地址就能部署/更新**
+```bash
+# 在服务器上，克隆 image 父仓库（含三个子模块）
+git clone --recurse-submodules https://github.com/<你的名>/image.git /opt/image
+cd /opt/image
+# 若父仓库 .gitmodules 已指向你的 fork（做过 §2③），直接：
+./deploy/personal/deploy.sh update
+# 若还没改 .gitmodules，用环境变量临时指定 fork：
+BK_FORK_URL=https://github.com/<你的名>/chatgpt2api-bk.git ./deploy/personal/deploy.sh update
+```
+
+**方式 B（手动上传）**
+```bash
+# 把整个 image 仓库（含子模块）传到 /opt/image，例如：
+scp -r /c/Users/caiwujiang/Desktop/image root@<服务器IP>:/opt/image
+# 或分别 git clone 三个子模块到对应目录
+```
 
 ### 3.2 写配置
 ```bash
-cd /opt/chatgpt2api-bk/deploy/production
-# 用本指南配套的精简版覆盖更省心（deploy/personal 在仓库根，从 production 目录往上三级）：
+cd /opt/image/chatgpt2api-bk/deploy/production
+# 用本指南配套的精简版覆盖更省心：
 cp ../../deploy/personal/.env.personal.example .env.production
 nano .env.production
 ```
@@ -88,6 +128,7 @@ nano .env.production
 - 个人版：`REGISTRATION_ENABLED=false`（不开放注册，只你自己用 key）
 
 > 安全提示：`.env.production` 含真实密钥，**已被仓库 `.gitignore` 忽略**，请勿提交。本目录的 `.env.personal.example` 仅占位符，可安全提交。
+> 密钥最佳实践：用环境变量 `CHATGPT2API_AUTH_KEY` 启动时传入，避免把 key 写进 `config.json`。本机 `config.json` 已 `git update-index --assume-unchanged` 保护，不会入库。
 
 ### 3.3 启动
 ```bash
@@ -122,6 +163,18 @@ curl -fsS https://img.example.com/api/storage/info
 2. 导入几个账号（access_token）到账号池，看 `/api/accounts` 是否刷出 email/额度。
 3. 跑一次异步出图任务，确认状态到 `succeeded`，并能打开生成图 URL。
 
+### 3.7 后续更新（贴地址就能更新）
+以后每次改完代码推到 GitHub，服务器只要：
+```bash
+cd /opt/image
+# 若 .gitmodules 已指向 fork：
+./deploy/personal/deploy.sh update
+# 否则：
+BK_FORK_URL=https://github.com/<你的名>/chatgpt2api-bk.git ./deploy/personal/deploy.sh update
+```
+脚本会：拉父仓库最新 → 更新子模块（含你的 bk 二开）→ 重建并重启 → 健康检查。
+这就是"贴项目地址能部署更新"的落地方式：**地址 = git URL，更新 = 一次 `deploy.sh update`**。
+
 ---
 
 ## 4. 稳定性加固清单（重点）
@@ -139,7 +192,7 @@ curl -fsS https://img.example.com/api/storage/info
 | 安全 | 管理员 key 保密 | `CHATGPT2API_AUTH_KEY` 泄露=账号池全失守；定期轮换 |
 | 安全 | 关闭对外注册 | 个人版 `REGISTRATION_ENABLED=false` |
 | 可用 | 账号池不断供 | 见 §6 自动续命；单账号限流会自动切下一个 |
-| 升级 | 平滑更新 | `git pull && docker compose ... up -d --build`，起不来用旧镜像回滚 |
+| 升级 | 平滑更新 | `./deploy.sh update`，起不来用旧镜像回滚 |
 
 ---
 
@@ -150,7 +203,7 @@ curl -fsS https://img.example.com/api/storage/info
 ```bash
 # crontab -e
 # 每天 3:30 备份（含图片资源），脚本自身按 BACKUP_RETENTION_DAYS=30 清理
-30 3 * * * cd /opt/chatgpt2api-bk/deploy/production && docker compose --env-file .env.production exec -T api sh -lc 'python scripts/backup_data.py create --database-url "$DATABASE_URL" --json' >> /var/log/c2a-backup.log 2>&1
+30 3 * * * cd /opt/image/chatgpt2api-bk/deploy/production && docker compose --env-file .env.production exec -T api sh -lc 'python scripts/backup_data.py create --database-url "$DATABASE_URL" --json' >> /var/log/c2a-backup.log 2>&1
 ```
 
 验证 / 演练恢复（关键：备份没验证过等于没有）：
@@ -208,9 +261,8 @@ docker compose --env-file .env.production logs -f caddy
 # 重启单个服务
 docker compose --env-file .env.production restart api
 
-# 更新版本（git 工作流见 §8）
-cd /opt/chatgpt2api-bk && git pull
-docker compose -f deploy/production/docker-compose.yml --env-file deploy/production/.env.production up -d --build
+# 更新版本（git 工作流见 §8，脚本见 §3.7）
+./deploy/personal/deploy.sh update
 
 # 磁盘 / 资源
 df -h ; docker system df
@@ -226,26 +278,30 @@ curl -s -H "Authorization: Bearer <key>" https://img.example.com/api/admin/alert
 
 本仓库的版本控制约定：
 
-- ✅ **可提交**：源码、`deploy/production/*.example`、`deploy/production/docker-compose.yml`/`Caddyfile`/`README.md`、本目录 `deploy/personal/` 下的全部文件（`.env.personal.example` 仅为占位符）。
-- ❌ **不提交**（已被 `.gitignore` 忽略）：`.env.production`（真实密钥）、`bridge-state.json`（运行时生成的映射）、`accounts.txt` / blackcat 的 `config.json`（运行凭据）。
+- ✅ **可提交**：源码、`deploy/production/*.example`、`deploy/production/docker-compose.yml`/`Caddyfile`/`README.md`、本目录 `deploy/personal/` 下的全部文件（`.env.personal.example` 仅为占位符）、父仓库 `README.md` / `.gitmodules`。
+- ❌ **不提交**（已被 `.gitignore` 忽略）：`.env.production`（真实密钥）、`bridge-state.json`（运行时生成的映射）、`accounts.txt` / blackcat 的 `config.json`（运行凭据）、`chatgpt2api-bk/config.json`（真实 auth-key，已 `assume-unchanged`）。
 
-常规更新流程：
+常规更新流程（开发机）：
 ```bash
+# 改完代码后
 git status                              # 确认只有预期文件变更
 git add -A
-git commit -m "deploy: 更新 xxx"
+git commit -m "feat: 更新 xxx"
 git push                               # 推到你的远端
-# 服务器上：
-ssh root@server
-cd /opt/chatgpt2api-bk && git pull
-docker compose -f deploy/production/docker-compose.yml --env-file deploy/production/.env.production up -d --build
+
+# 若改的是 bk 子模块，进入子模块再 push：
+cd chatgpt2api-bk && git add -A && git commit -m "..." && git push
+# 父仓库记录新的子模块指针：
+cd .. && git add chatgpt2api-bk && git commit -m "bump bk" && git push
 ```
+
+服务器更新（见 §3.7）：`./deploy/personal/deploy.sh update`
 
 回滚：
 ```bash
 git log --oneline | head          # 找到上一个好版本 <commit>
 git checkout <commit>
-docker compose ... up -d --build  # 用旧镜像重建
+./deploy/personal/deploy.sh update  # 用旧镜像重建
 ```
 
 ---
@@ -258,3 +314,32 @@ docker compose ... up -d --build  # 用旧镜像重建
 - **账号池老是"限流/异常"**：token 过期没续命（配 §6），或账号本身额度用尽——限流会自动轮到下一个可用账号。
 - **别把 5432/6379/9000 映射到公网**：个人版保持内网 expose，只暴露 Caddy 的 80/443。
 - **bridge-state.json 误提交**：已加进 `.gitignore`；若已误加，执行 `git rm --cached deploy/personal/bridge-state.json`。
+- **服务器跑的是上游干净版（不含二开）**：忘了 §2 的 Fork + 子模块指向 fork。检查 `git -C chatgpt2api-bk remote -v` 是否指向你的 fork；不是就重做 §2③ 或部署时带 `BK_FORK_URL`。
+- **本地改了 bk 但没生效**：`config.json` 被 `assume-unchanged` 保护，改它不会进提交；改源码（`api/`、`services/`、`web/`）才会随 `git push` + `deploy.sh update` 上服务器。
+
+---
+
+## 10. 可选：用 image-gen-demo 作公开前端（需改 compose）
+
+如果你想要一个更友好的对外页面（暴露 8080），可以用 `image-gen-demo` 包住 bk。**但它的默认 compose 拉的是上游镜像，不会用你的二开**，必须改成 build 你的 fork：
+
+```yaml
+# image-gen-demo/docker-compose.yml 修改 chatgpt2api 服务：
+services:
+  chatgpt2api:
+    build:
+      context: ../chatgpt2api-bk      # 改用你的子模块源码，而非 ghcr.io 上游镜像
+      dockerfile: Dockerfile
+    image: chatgpt2api:local
+    container_name: chatgpt2api
+    restart: unless-stopped
+    volumes:
+      - ./c2a-data:/app/data
+      - ./c2a-config.json:/app/config.json:ro
+    environment:
+      - STORAGE_BACKEND=json
+      - CHATGPT2API_AUTH_KEY=${C2A_KEY}
+```
+其余 image-gen-demo 的环境变量（`C2A_BASE=http://chatgpt2api:80`、`C2A_KEY`、`IMAGE_API_BASE=http://chatgpt2api:80/v1/images`）不变。这样公开页就用上了你的二开后端。
+
+> 个人/小圈子用，直接部署 §3 的 bk 就够了，不必折腾这一节。
