@@ -7,3 +7,6 @@
 [submodule "image-gen-demo"]
 	path = image-gen-demo
 	url = https://github.com/wujiangcai/gpt-image.git
+[submodule "blackcat-relogin-dev"]
+	path = blackcat-relogin-dev
+	url = https://github.com/wujiangcai/re-login.git

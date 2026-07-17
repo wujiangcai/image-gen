@@ -8,7 +8,7 @@
 #
 # 关键前提（务必先看 deploy/personal/README.md 第 2 节）：
 #   chatgpt2api-bk 已是你的 fork（wujiangcai/chatgpt2api-bk），本地二开已推上。
-#   blackcat-relogin-dev 是第4个子模块（wujiangcai/blackcat-relogin-dev），用于自动补号/重登，
+#   blackcat-relogin-dev 是第4个子模块（GitHub 仓库 wujiangcai/re-login），用于自动补号/重登，
 #   随父仓库一起 clone，无需单独在 VPS 放 /opt/blackcat-relogin-dev。
 #
 # 用法：

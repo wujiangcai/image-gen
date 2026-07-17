@@ -87,15 +87,14 @@ git push
 > 做过 ③ 后，服务器 clone 时子模块就直接是 fork；没做 ③ 也行，但服务器跑 `deploy.sh` 时必须带 `BK_FORK_URL=...`（见 §3.7）。
 
 **④ blackcat-relogin-dev（第4个子模块，自动补号/重登）**
-不是 Fork，是你自己的新仓库：
-1. GitHub **新建**空仓库 `blackcat-relogin-dev`（不要勾选 README / .gitignore / License，我们已自带）。
-2. 本地推送（已跟踪文件无密钥，安全）：
+不是 Fork，是你自己的新仓库。**GitHub 仓库名是 `re-login`**（你已建好：`https://github.com/wujiangcai/re-login.git`）；在 image 内以子模块目录 `blackcat-relogin-dev` 引用（与本地文件夹名一致）。
+1. 本地推送（已跟踪文件无密钥，安全）：
    ```bash
    cd blackcat-relogin-dev
-   git remote add origin https://github.com/<你的名>/blackcat-relogin-dev.git
+   git remote add origin https://github.com/wujiangcai/re-login.git
    git push -u origin main
    ```
-3. 注册为 image 第4个子模块，并让父仓库记录（见 ⑤）。
+2. 注册为 image 第4个子模块，并让父仓库记录（见 ⑤）。
 
 **⑤（可选）image-gen-demo / chat2api**
 - `image-gen-demo` 你已有 `wujiangcai/gpt-image`，直接推。
@@ -104,7 +103,7 @@ git push
 **⑥ 把 blackcat 注册为 image 的第4个子模块**
 ```bash
 cd image
-git submodule add https://github.com/<你的名>/blackcat-relogin-dev.git blackcat-relogin-dev
+git submodule add https://github.com/wujiangcai/re-login.git blackcat-relogin-dev
 git add .gitmodules blackcat-relogin-dev
 git commit -m "chore: add blackcat-relogin-dev as 4th submodule (auto relogin)"
 git push
@@ -344,7 +343,7 @@ git checkout <commit>
 - **别把 5432/6379/9000 映射到公网**：个人版保持内网 expose，只暴露 Caddy 的 80/443。
 - **bridge-state.json 误提交**：已加进 `.gitignore`；若已误加，执行 `git rm --cached deploy/personal/bridge-state.json`。
 - **服务器跑的是上游干净版（不含二开）**：忘了 §2 的 Fork + 子模块指向 fork。检查 `git -C chatgpt2api-bk remote -v` 是否指向你的 fork；不是就重做 §2③ 或部署时带 `BK_FORK_URL`。
-- **blackcat 子模块是空的**：`git submodule status` 里 `blackcat-relogin-dev` 前面是 `-` 说明没拉到。先确认 GitHub 上 `wujiangcai/blackcat-relogin-dev` 已创建且已 push，再运行 `git submodule update --init --remote blackcat-relogin-dev`。
+- **blackcat 子模块是空的**：`git submodule status` 里 `blackcat-relogin-dev` 前面是 `-` 说明没拉到。先确认 GitHub 上 `wujiangcai/re-login` 已创建且已 push，再运行 `git submodule update --init --remote blackcat-relogin-dev`。
 - **本地改了 bk 但没生效**：`config.json` 被 `assume-unchanged` 保护，改它不会进提交；改源码（`api/`、`services/`、`web/`）才会随 `git push` + `deploy.sh update` 上服务器。
 
 ---
