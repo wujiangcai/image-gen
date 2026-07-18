@@ -13,6 +13,7 @@
 #
 # 用法：
 #   部署/更新：  ./deploy.sh update
+#   当前版本重建：./deploy.sh deploy
 #   看状态：     ./deploy.sh status
 #   看日志：     ./deploy.sh logs
 #
@@ -20,7 +21,6 @@
 #   BK_FORK_URL   你的 bk fork 地址。设置后脚本每次会把它设为子模块地址，
 #                确保服务器拉到的是"你的二开"而非上游。
 #                例：BK_FORK_URL=https://github.com/wujiangcai/chatgpt2api-bk.git
-#   GIT_URL       image 父仓库地址（首次 clone 用）。默认见下。
 #
 set -euo pipefail
 
@@ -30,7 +30,6 @@ BK_DIR="$REPO_DIR/chatgpt2api-bk"
 PROD_DIR="$BK_DIR/deploy/production"
 BLACKCAT_DIR="$REPO_DIR/blackcat-relogin-dev"   # 第4个子模块：自动补号/重登
 
-GIT_URL="${GIT_URL:-https://github.com/wujiangcai/image.git}"
 BK_FORK_URL="${BK_FORK_URL:-}"
 CMD="${1:-update}"
 
@@ -45,27 +44,31 @@ guard_dirty() {
 # 确保 bk 子模块指向你的 fork（若提供）
 ensure_fork() {
   if [ -n "$BK_FORK_URL" ]; then
-    echo "==> 将子模块 chatgpt2api-bk 指向 fork: $BK_FORK_URL"
-    git -C "$REPO_DIR" submodule set-url chatgpt2api-bk "$BK_FORK_URL"
+    echo "==> 本机覆盖 chatgpt2api-bk 子模块地址: $BK_FORK_URL"
+    git -C "$REPO_DIR" config submodule.chatgpt2api-bk.url "$BK_FORK_URL"
   else
-    echo "==> 未设置 BK_FORK_URL：将使用 .gitmodules 中记录的地址。"
-    echo "    （若 .gitmodules 仍指向上游 basketikun，服务器只会拿到上游干净版，不含你的二开）"
+    echo "==> 使用 .gitmodules 中记录的 chatgpt2api-bk 地址。"
   fi
 }
 
 case "$CMD" in
-  update)
+  update|deploy)
     guard_dirty
-    echo "==> 拉取 image 父仓库最新代码"
-    git -C "$REPO_DIR" pull --ff-only
+    if [ "$CMD" = "update" ]; then
+      echo "==> 拉取 image 父仓库最新代码"
+      git -C "$REPO_DIR" pull --ff-only
+    else
+      echo "==> 使用当前父仓库提交重建（不执行 git pull）"
+    fi
 
-    echo "==> 更新子模块（含 bk 二开 + blackcat-relogin-dev）"
+    echo "==> 按父仓库锁定提交更新四个子模块"
     ensure_fork
-    git -C "$REPO_DIR" submodule update --init --remote --recursive
+    git -C "$REPO_DIR" submodule sync --recursive
+    git -C "$REPO_DIR" submodule update --init --recursive
 
     echo "==> 确保 blackcat-relogin-dev 依赖就绪（自动补号/重登用）"
     if [ -d "$BLACKCAT_DIR" ]; then
-      ( cd "$BLACKCAT_DIR" && npm install --no-audit --no-fund >/dev/null 2>&1 \
+      ( cd "$BLACKCAT_DIR" && npm ci --no-audit --no-fund >/dev/null 2>&1 \
         && echo "OK: blackcat npm 依赖已就绪" ) \
         || echo "!! blackcat npm install 失败，请手动: cd $BLACKCAT_DIR && npm install"
       # Playwright 浏览器只需装一次（需 root + apt）；失败不阻断主流程
@@ -84,6 +87,10 @@ case "$CMD" in
       exit 1
     fi
     docker compose --env-file .env.production up -d --build
+
+    echo "==> 执行数据库迁移"
+    docker compose --env-file .env.production exec -T api sh -lc \
+      'python scripts/migrate_database.py --database-url "$DATABASE_URL"'
 
     echo "==> 等待服务就绪并健康检查"
     sleep 8
@@ -108,7 +115,7 @@ case "$CMD" in
     ;;
 
   *)
-    echo "用法: $0 {update|status|logs}" >&2
+    echo "用法: $0 {update|deploy|status|logs}" >&2
     exit 1
     ;;
 esac

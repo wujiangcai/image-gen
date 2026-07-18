@@ -1,6 +1,6 @@
 [submodule "chat2api"]
 	path = chat2api
-	url = https://github.com/LanQian528/chat2api.git
+	url = https://github.com/wujiangcai/chat2api.git
 [submodule "chatgpt2api-bk"]
 	path = chatgpt2api-bk
 	url = https://github.com/wujiangcai/chat2api-bk.git

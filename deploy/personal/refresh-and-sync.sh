@@ -32,9 +32,17 @@ BRIDGE_JS="$DIR/blackcat-chatgpt2api-bridge.js"   # 桥接脚本（同目录）
 STATE_FILE="$DIR/bridge-state.json"               # email->token 映射（运行时生成，已 gitignore）
 # ----------------------------------------
 
-# chatgpt2api 地址与管理员 key（与 .env.production 里 CHATGPT2API_AUTH_KEY 一致）
-C2A_BASE_URL="https://img.example.com"            # 或 http://127.0.0.1:3000（单容器模式）
-C2A_AUTH_KEY="change-me-long-random-admin-secret"
+# 运行凭据从 gitignored 文件或进程环境读取，避免把管理员 key 写进脚本。
+TOKEN_REFRESH_ENV_FILE="${TOKEN_REFRESH_ENV_FILE:-$DIR/token-refresh.env}"
+if [ -f "$TOKEN_REFRESH_ENV_FILE" ]; then
+  # 文件格式为 shell KEY=value；权限建议 chmod 600。
+  set -a
+  # shellcheck disable=SC1090
+  . "$TOKEN_REFRESH_ENV_FILE"
+  set +a
+fi
+C2A_BASE_URL="${C2A_BASE_URL:-http://127.0.0.1}"
+: "${C2A_AUTH_KEY:?请在 token-refresh.env 或环境变量中设置 C2A_AUTH_KEY}"
 
 echo "===== $(date '+%F %T') token refresh start ====="
 
@@ -51,6 +59,7 @@ cd "$BLACKCAT_DIR"
 node src/cli.js refresh \
   --file "$ACCOUNTS_FILE" \
   --save-login-session \
+  --at-check-remote \
   --save-dir "$SAVE_DIR" \
   --config config.json
 

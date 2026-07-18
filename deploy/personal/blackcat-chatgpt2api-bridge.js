@@ -32,7 +32,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
-      const key = a.slice(2);
+      const key = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       const next = argv[i + 1];
       if (!next || next.startsWith("--")) args[key] = true;
       else args[key] = argv[++i];
@@ -83,7 +83,7 @@ function requestJson({ baseUrl, apiPath, method, authKey, body }) {
       "Content-Type": "application/json",
       Accept: "application/json"
     };
-    if (authKey) headers["Authorization"] = authKey;
+    if (authKey) headers["Authorization"] = /^Bearer\s/i.test(authKey) ? authKey : `Bearer ${authKey}`;
     if (payload) headers["Content-Length"] = Buffer.byteLength(payload);
     const req = lib.request(
       u,
@@ -184,6 +184,9 @@ blackcat → chatgpt2api 账号同步桥接
       body: { tokens: toDelete }
     });
     console.log(`[bridge] DELETE 旧 token: HTTP ${r.status} -> ${r.text.slice(0, 200)}`);
+    if (r.status < 200 || r.status >= 300) {
+      throw new Error(`DELETE 旧 token 失败: HTTP ${r.status}`);
+    }
   }
 
   if (toAdd.length) {
@@ -195,6 +198,9 @@ blackcat → chatgpt2api 账号同步桥接
       body: { tokens: toAdd }
     });
     console.log(`[bridge] POST 导入: HTTP ${r.status}`);
+    if (r.status < 200 || r.status >= 300) {
+      throw new Error(`POST 导入失败: HTTP ${r.status} ${r.text.slice(0, 200)}`);
+    }
     if (r.json) {
       const added = r.json.added ?? "?";
       const refreshed = r.json.refreshed ?? "?";
@@ -211,7 +217,11 @@ blackcat → chatgpt2api 账号同步桥接
   console.log(`[bridge] done.`);
 }
 
-main().catch((e) => {
-  console.error("[bridge] error:", e.stack || e.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((e) => {
+    console.error("[bridge] error:", e.stack || e.message);
+    process.exit(1);
+  });
+}
+
+module.exports = { findBlackcatTokens, main, parseArgs, requestJson };

@@ -1,374 +1,402 @@
-# chatgpt2api-bk · 单机个人版部署指南
+# image-gen 个人生产部署指南
 
-> 适用场景：**单台 VPS 一把梭 · 主要是 `chatgpt2api-bk` 主后端 · 个人/小圈子自用 · 顺带把 blackcat 账号刷新做成服务器上的自动续命。**
->
-> 本目录 `deploy/personal/`（位于仓库根，独立于 `chatgpt2api-bk` 子模块）是个人自用精简部署包，复用子模块内自带的 `chatgpt2api-bk/deploy/production` 生产级 compose，只是关掉了支付/邮件/对外注册。
+本指南部署父仓库中的生产主线 `chatgpt2api-bk`，并可选启用 `blackcat-relogin-dev` 定时刷新 AT。目标环境为 Ubuntu 22.04/24.04 单机 VPS。
 
----
+## 1. 最终架构
 
-## 0. 先回答三个常见问题
+```text
+Internet
+   │ 80/443
+ Caddy
+   │
+ chatgpt2api-bk API/Web
+   ├─ PostgreSQL
+   ├─ Redis
+   ├─ MinIO
+   └─ ChatGPT Web / 图片上游
 
-**Q1：项目是怎么启动的？bk 是后端吗？**
-**是的，`chatgpt2api-bk` 就是主后端。** 它是 FastAPI 应用（`main.py` → `create_app()`），自带：账号池、Web 管理台 UI、图片生成 API。你本地"能正常生图"就是它单独跑起来（端口 8000）的结果。本地启动方式：
+blackcat-relogin-dev
+   └─ bridge ──> /api/accounts
+```
+
+父仓库地址：<https://github.com/wujiangcai/image-gen>
+
+四个子模块均指向个人仓库：
+
+- `wujiangcai/chat2api-bk`
+- `wujiangcai/gpt-image`
+- `wujiangcai/re-login`
+- `wujiangcai/chat2api`
+
+## 2. 服务器准备
+
+建议至少 2 vCPU、4 GB 内存、30 GB 磁盘；图片资产多时使用独立数据盘或外部 S3/R2。
+
 ```bash
-cd chatgpt2api-bk
-STORAGE_BACKEND=json .venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
-```
-服务器上则用它的生产 compose（Docker，见 §3），更稳定。
-
-**Q2：image-gen-demo 和 chat2api 又是什么？**
-- `image-gen-demo`（子模块 `wujiangcai/gpt-image`）：一个**对外轻量前端/包装**（暴露 8080）。⚠️ 它默认的 `docker-compose.yml` 拉的是**上游已发布镜像** `ghcr.io/basketikun/chatgpt2api:latest`，**不是你本地二开的代码**。也就是说：只用 image-gen-demo 而不改它的 compose，服务器跑的是上游干净版。
-- `chat2api`（子模块 `LanQian528/chat2api`）：一个 ChatGPT→API **中继库**，你没改它（=上游）。它只在 image-gen-demo 的 "relay/chat2api 模式" 下，用来把生图 prompt 转成 chat completions。`chatgpt2api-bk` 自身**不依赖** chat2api（bk 自带 `chatgpt_service`）。
-
-**结论（个人用什么）**：直接用 `chatgpt2api-bk` 即可（已验证可生图、含账号池+管理台）。`image-gen-demo` 是可选的更友好公开 UI，**且必须改成 build 你自己的 bk fork** 才能用上你的二开（见 §10）。
-
-**Q3：bk 现在没有自己的 GitHub 仓库，怎么办？要新建吗？**
-**不要建空白仓库，要 Fork。** 详见 §2。一句话：在 GitHub 上 Fork `basketikun/chatgpt2api` → 把本地二开推上去 → 父仓库子模块指向你的 fork。这样服务器 `docker compose up --build` 才会编进你的二开（生产 compose 是 `build: context: ../..`，从本地源码构建）。
-
-**Q4：blackcat-relogin-dev 又是什么？它也算进这个集合吗？**
-**算，它现在是 image 的第4个子模块。** blackcat 负责"自动补号/重登"：定时用邮箱 OTP 重新登录 ChatGPT、刷出新的 `access_token`，再由桥接脚本推进 `chatgpt2api-bk` 的账号池（旧删新加防重复），实现账号池自动续命。详见 §6。你已选定把它作为第4个子模块纳入 image 集合（与 bk / image-gen-demo / chat2api 并列）。
-
----
-
-## 1. 架构（单机全栈）
-
-```
-             Internet
-                │  443/80
-         ┌──────▼──────┐
-         │   Caddy     │  自动 HTTPS + 安全头 + 反代
-         └──────┬──────┘
-                │ 内网 :80
-         ┌──────▼──────┐
-         │  api (FastAPI / chatgpt2api-bk)  ← 图片API + 账号池 + Web管理台
-         └──┬───┬───┬──┘
-            │   │   └────────────┐
-    ┌───────▼┐ ┌▼─────┐   ┌──────▼──────┐
-    │Postgres│ │Redis │   │   MinIO     │
-    │ 账号/  │ │队列/ │   │  图片对象   │
-    │ 业务库 │ │锁/限流│  │   存储      │
-    └────────┘ └──────┘   └─────────────┘
-数据卷：postgres_data / redis_data / minio_data / api_data / caddy_data
+sudo apt-get update
+sudo apt-get install -y git curl ca-certificates openssl nodejs npm
+curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+sudo sh /tmp/get-docker.sh
+sudo usermod -aG docker "$USER"
+newgrp docker
+docker --version
+docker compose version
+node --version
 ```
 
-为什么个人版也用这套而不是"单容器 + json 文件"：
-- **Postgres** 避免 json 文件并发写损坏，这是长期稳定的地基。
-- **Redis** 让图片任务有重试/死信/超时回收，卡住的任务能自愈。
-- **Caddy** 自动续 HTTPS 证书，零维护。
-- 每个服务都带 `healthcheck` + `restart: unless-stopped`，挂了自动拉起。
+Blackcat 要求 Node.js 20 或更高。系统仓库版本过低时，改用 NodeSource、nvm 或发行版支持的 Node 20 包。
 
-> 想要极简：仓库根还有单容器 `docker-compose.yml`（`STORAGE_BACKEND=json`，映射 3000 端口）。省事但并发/稳定性弱，仅建议临时试用。
+## 3. 克隆父仓库
 
----
-
-## 2. 把 bk 变成你自己的仓库（Fork，关键步骤）
-
-`chatgpt2api-bk` 目前远程是上游 `basketikun/chatgpt2api`，你的本地二开（2 个提交 `a2899b2` + `6a013bc`）**还没推到任何 GitHub 仓库**。服务器要拿到你的二开，必须先把 bk 变成你自己的仓库：
-
-**① 在 GitHub 上 Fork**
-打开 https://github.com/basketikun/chatgpt2api → 点 Fork → 得到 `https://github.com/<你的名>/chatgpt2api-bk.git`（含上游基底 commit `da5e0b42`）。
-
-**② 本地推送二开**
 ```bash
-cd chatgpt2api-bk
-git remote set-url origin https://github.com/<你的名>/chatgpt2api-bk.git
-git push -u origin main      # 推 6a013bc，auth-key 已是占位符，安全
+sudo mkdir -p /opt/image-gen
+sudo chown "$USER":"$USER" /opt/image-gen
+git clone --recurse-submodules \
+  https://github.com/wujiangcai/image-gen.git /opt/image-gen
+cd /opt/image-gen
+git submodule status
 ```
-> 若 push 被拒（fork 默认分支名不同），按提示 `git push -u origin HEAD:<fork默认分支>`。
 
-**③ 让父仓库 image 指向你的 fork（推荐，否则别人/服务器 clone 到的还是上游）**
-```bash
-cd image
-git submodule set-url chatgpt2api-bk https://github.com/<你的名>/chatgpt2api-bk.git
-git add chatgpt2api-bk .gitmodules
-git commit -m "chore: chatgpt2api-bk 指向我的 fork"
-git push
+必须看到四行，且行首没有 `-`：
+
+```text
+blackcat-relogin-dev
+chat2api
+chatgpt2api-bk
+image-gen-demo
 ```
-> 做过 ③ 后，服务器 clone 时子模块就直接是 fork；没做 ③ 也行，但服务器跑 `deploy.sh` 时必须带 `BK_FORK_URL=...`（见 §3.7）。
 
-**④ blackcat-relogin-dev（第4个子模块，自动补号/重登）**
-不是 Fork，是你自己的新仓库。**GitHub 仓库名是 `re-login`**（你已建好：`https://github.com/wujiangcai/re-login.git`）；在 image 内以子模块目录 `blackcat-relogin-dev` 引用（与本地文件夹名一致）。
-1. 本地推送（已跟踪文件无密钥，安全）：
-   ```bash
-   cd blackcat-relogin-dev
-   git remote add origin https://github.com/wujiangcai/re-login.git
-   git push -u origin main
-   ```
-2. 注册为 image 第4个子模块，并让父仓库记录（见 ⑤）。
+不要用 `scp -r` 上传整个开发目录，避免把本机 `.env`、AT、邮箱凭据和缓存带到服务器。
 
-**⑤（可选）image-gen-demo / chat2api**
-- `image-gen-demo` 你已有 `wujiangcai/gpt-image`，直接推。
-- `chat2api` 是别人的仓库，你没改，**保持引用上游即可，不要推**。
+## 4. 生产配置
 
-**⑥ 把 blackcat 注册为 image 的第4个子模块**
 ```bash
-cd image
-git submodule add https://github.com/wujiangcai/re-login.git blackcat-relogin-dev
-git add .gitmodules blackcat-relogin-dev
-git commit -m "chore: add blackcat-relogin-dev as 4th submodule (auto relogin)"
-git push
+cd /opt/image-gen
+cp deploy/personal/.env.personal.example \
+  chatgpt2api-bk/deploy/production/.env.production
+chmod 600 chatgpt2api-bk/deploy/production/.env.production
+nano chatgpt2api-bk/deploy/production/.env.production
 ```
-> 注册后，`deploy.sh update` 会一并拉取 blackcat 最新代码；`refresh-and-sync.sh` 会自动定位它（无需手改路径）。
 
----
+必须替换：
 
-## 3. 部署主后端（核心步骤）
+| 配置 | 要求 |
+|---|---|
+| `CADDY_SITE_ADDRESS` | 正式域名，如 `https://img.example.com` |
+| `ACME_EMAIL` | 证书通知邮箱 |
+| `CHATGPT2API_BASE_URL` / `APP_PUBLIC_URL` | 与正式域名一致 |
+| `WEB_ALLOWED_ORIGINS` | 只列可信前端域名 |
+| `CHATGPT2API_AUTH_KEY` | 长随机管理员 key |
+| `POSTGRES_PASSWORD` | 长随机数据库密码，并同步更新 `DATABASE_URL` |
+| `MINIO_ROOT_PASSWORD` | 长随机密码，并同步更新对象存储 secret |
+| `OBJECT_STORAGE_PUBLIC_BASE_URL` | Caddy 对象存储公共路径或 CDN 域名 |
 
-### 3.1 把代码弄到服务器
-两种方式，任选其一：
+生成随机值：
 
-**方式 A（推荐，git 驱动）—— 贴项目地址就能部署/更新**
 ```bash
-# 在服务器上，克隆 image 父仓库（含四个子模块，含 blackcat-relogin-dev）
-git clone --recurse-submodules https://github.com/<你的名>/image.git /opt/image
-cd /opt/image
-# 若父仓库 .gitmodules 已指向你的 fork（做过 §2③），直接：
+openssl rand -hex 32
+```
+
+个人环境建议：
+
+```env
+REGISTRATION_ENABLED=false
+IMAGE_JOB_QUEUE_BACKEND=redis
+RATE_LIMIT_BACKEND=redis
+IMAGE_SSE_TIMEOUT_SECONDS=180
+AUTH_SESSION_COOKIE_ENABLED=true
+AUTH_SESSION_COOKIE_SECURE=true
+AUTH_RESPONSE_INCLUDE_TOKEN=false
+```
+
+Compose 完整变量说明见 [`chatgpt2api-bk/deploy/production/README.md`](../../chatgpt2api-bk/deploy/production/README.md)。
+
+## 5. 启动、迁移与预检
+
+可直接使用父仓库脚本：
+
+```bash
+cd /opt/image-gen
+chmod +x deploy/personal/deploy.sh
 ./deploy/personal/deploy.sh update
-# 若还没改 .gitmodules，用环境变量临时指定 fork：
-BK_FORK_URL=https://github.com/<你的名>/chatgpt2api-bk.git ./deploy/personal/deploy.sh update
 ```
 
-**方式 B（手动上传）**
-```bash
-# 把整个 image 仓库（含子模块）传到 /opt/image，例如：
-scp -r /c/Users/caiwujiang/Desktop/image root@<服务器IP>:/opt/image
-# 或分别 git clone 四个子模块到对应目录
-```
+脚本会：
 
-### 3.2 写配置
-```bash
-cd /opt/image/chatgpt2api-bk/deploy/production
-# 用本指南配套的精简版覆盖更省心：
-cp ../../deploy/personal/.env.personal.example .env.production
-nano .env.production
-```
-**必须改的项**（详见 `.env.personal.example` 注释）：
-- `CADDY_SITE_ADDRESS` / `CHATGPT2API_BASE_URL` / `WEB_ALLOWED_ORIGINS` / `APP_PUBLIC_URL` → 你的域名
-- `ACME_EMAIL` → 你的邮箱（Let's Encrypt 通知用）
-- `CHATGPT2API_AUTH_KEY` → 管理员密钥，**长随机**：`openssl rand -hex 24`
-- `POSTGRES_PASSWORD` 且同步进 `DATABASE_URL`
-- `MINIO_ROOT_PASSWORD` 且同步进 `OBJECT_STORAGE_SECRET_ACCESS_KEY`
-- 个人版：`REGISTRATION_ENABLED=false`（不开放注册，只你自己用 key）
+1. 拒绝覆盖未提交工作区。
+2. `git pull --ff-only` 更新父仓库。
+3. 按父提交初始化四个子模块。
+4. 安装 Blackcat Node 依赖。
+5. 构建/启动生产 Compose。
+6. 执行数据库迁移。
+7. 检查 `/health/live`。
 
-> 安全提示：`.env.production` 含真实密钥，**已被仓库 `.gitignore` 忽略**，请勿提交。本目录的 `.env.personal.example` 仅占位符，可安全提交。
-> 密钥最佳实践：用环境变量 `CHATGPT2API_AUTH_KEY` 启动时传入，避免把 key 写进 `config.json`。本机 `config.json` 已 `git update-index --assume-unchanged` 保护，不会入库。
+也可手动执行：
 
-### 3.3 启动
 ```bash
+cd /opt/image-gen/chatgpt2api-bk/deploy/production
+docker compose --env-file .env.production config >/dev/null
 docker compose --env-file .env.production up -d --build
-docker compose --env-file .env.production ps    # postgres/redis/minio/api/caddy 应为 healthy/running
-```
-
-### 3.4 建库（首次必做）
-```bash
-docker compose --env-file .env.production exec api sh -lc \
+docker compose --env-file .env.production exec -T api sh -lc \
   'python scripts/migrate_database.py --database-url "$DATABASE_URL"'
-# 查看状态
-docker compose --env-file .env.production exec api sh -lc \
-  'python scripts/migrate_database.py --database-url "$DATABASE_URL" --status'
+docker compose --env-file .env.production exec -T api sh -lc \
+  'python scripts/check_production_ready.py'
+docker compose --env-file .env.production ps
 ```
 
-### 3.5 上线预检 + 健康校验
-```bash
-# 容器内严格预检（会告诉你哪些必配项还没配好）
-docker compose --env-file .env.production exec api sh -lc 'python scripts/check_production_ready.py'
+健康检查：
 
-# 存活/就绪探针
+```bash
 curl -fsS https://img.example.com/health/live
 curl -fsS https://img.example.com/health/ready
-
-# 存储/队列确认（应显示 postgres / redis / minio）
-curl -fsS https://img.example.com/api/storage/info
+curl -fsS -H 'Authorization: Bearer <admin-key>' \
+  'https://img.example.com/api/admin/metrics?format=prometheus'
 ```
 
-### 3.6 冒烟测试
-1. 用管理员 key 登录 Web 管理台（`https://img.example.com`）。
-2. 导入几个账号（access_token）到账号池，看 `/api/accounts` 是否刷出 email/额度。
-3. 跑一次异步出图任务，确认状态到 `succeeded`，并能打开生成图 URL。
+## 6. 代理
 
-### 3.7 后续更新（贴地址就能更新）
-以后每次改完代码推到 GitHub，服务器只要：
-```bash
-cd /opt/image
-# 若 .gitmodules 已指向 fork：
-./deploy/personal/deploy.sh update
-# 否则：
-BK_FORK_URL=https://github.com/<你的名>/chatgpt2api-bk.git ./deploy/personal/deploy.sh update
-```
-脚本会：拉父仓库最新 → 更新子模块（含你的 bk 二开）→ 重建并重启 → 健康检查。
-这就是"贴项目地址能部署更新"的落地方式：**地址 = git URL，更新 = 一次 `deploy.sh update`**。
+在管理后台设置主后端全局代理。容器内不能用宿主机 `127.0.0.1`；使用 Docker 网桥可达的宿主机地址、`host.docker.internal`（平台支持时）或同 Compose 网络的代理服务名。
 
----
-
-## 4. 稳定性加固清单（重点）
-
-| 维度 | 措施 | 怎么做 |
-|---|---|---|
-| 自愈 | 容器崩溃自动重启 | compose 已 `restart: unless-stopped`，无需改 |
-| 自愈 | 依赖健康才启动 | compose 已用 `depends_on: condition: service_healthy` |
-| 自愈 | 卡死任务回收 | `IMAGE_JOB_STALE_RUNNING_SECONDS=900`、`IMAGE_JOB_MAX_ATTEMPTS=3` |
-| 数据 | **每日备份 + 异地** | 见 §5，cron 打包 + 同步到另一台/另一个桶 |
-| 数据 | 数据卷不要乱删 | `postgres_data`/`minio_data`/`api_data` 是命根子 |
-| 监控 | 主动告警 | `/api/admin/alerts`、`/api/admin/metrics?format=prometheus` |
-| 监控 | 磁盘水位 | `ALERT_DISK_FREE_MB=512`，MinIO 存图会涨，定期看 `df -h` |
-| 安全 | 只开 80/443 | Postgres/Redis/MinIO **不要**对公网暴露端口（compose 默认只 expose 内网） |
-| 安全 | 管理员 key 保密 | `CHATGPT2API_AUTH_KEY` 泄露=账号池全失守；定期轮换 |
-| 安全 | 关闭对外注册 | 个人版 `REGISTRATION_ENABLED=false` |
-| 可用 | 账号池不断供 | 见 §6 自动续命；单账号限流会自动切下一个 |
-| 升级 | 平滑更新 | `./deploy.sh update`，起不来用旧镜像回滚 |
-
----
-
-## 5. 每日备份（务必配）
-
-容器内已带 `backup_data.py`，宿主机加一条 cron 每天打包并做保留：
+宿主机先验证：
 
 ```bash
-# crontab -e
-# 每天 3:30 备份（含图片资源），脚本自身按 BACKUP_RETENTION_DAYS=30 清理
-30 3 * * * cd /opt/image/chatgpt2api-bk/deploy/production && docker compose --env-file .env.production exec -T api sh -lc 'python scripts/backup_data.py create --database-url "$DATABASE_URL" --json' >> /var/log/c2a-backup.log 2>&1
+curl -x http://proxy-host:7897 -I https://chatgpt.com/
+curl -x http://proxy-host:7897 -I https://login.microsoftonline.com/
 ```
 
-验证 / 演练恢复（关键：备份没验证过等于没有）：
+Blackcat 使用独立 `config.json` 的 `proxy`，会覆盖 HTTP、Graph/IMAP、Sentinel 与 Playwright。详见 [`blackcat-relogin-dev/docs/DEPLOYMENT.md`](../../blackcat-relogin-dev/docs/DEPLOYMENT.md)。
+
+## 7. 首次业务验收
+
+1. 打开正式域名并使用管理员 key 登录。
+2. 导入一个有效 AT。
+3. 刷新账号，确认邮箱、类型、状态和图片额度。
+4. 创建一个异步 `gpt-image-2` 任务。
+5. 确认任务 `queued` → `running` → `succeeded`。
+6. 打开对象存储图片 URL。
+7. 检查任务、资产、额度账本、审计、指标与告警。
+8. 创建并验证备份。
+
+最终上线签署建议运行：
+
 ```bash
-docker compose --env-file .env.production exec api sh -lc \
-  'python scripts/backup_data.py verify /app/data/backups/<文件>.zip --json'
+cd /opt/image-gen/chatgpt2api-bk
+python scripts/verify_production_deployment.py \
+  --base-url https://img.example.com \
+  --admin-key '<admin-key>' \
+  --image-job \
+  --strict-launch \
+  --output launch-evidence.json \
+  --upload-evidence
 ```
 
-**强烈建议**：再加一条把 `data/backups/*.zip` `rsync` 到另一台机器或另一个对象存储桶——同机备份挡不住 VPS 整机丢失。
+## 8. Blackcat 账号配置
 
----
-
-## 6. 账号池自动续命（对接 blackcat）
-
-原理：image 账号池吃的是 `access_token`（短期 JWT，会过期），它自己**不会**用 session_token 续。所以由 blackcat 定时重登刷出新 token，再用桥接脚本推进账号池（旧删新加，避免重复账号）。
-
-### 6.1 blackcat 已随 image 一起 clone（第4个子模块）
-blackcat-relogin-dev 现在是 image 的第4个子模块，**不用单独传**。随 `git clone --recurse-submodules` / `deploy.sh update` 自动落在 `/opt/image/blackcat-relogin-dev`：
 ```bash
-cd /opt/image/blackcat-relogin-dev
-npm install                                   # 依赖（deploy.sh update 也会自动跑）
-npx playwright install --with-deps chromium   # Sentinel/浏览器兜底需要（一次）
-cp config.example.json config.json            # 配好接码通道（API接码或Outlook）
-# 准备 accounts.txt，格式见 blackcat README（邮箱----API链接 等）
-```
-> `accounts.txt` / `config.json` 已被 blackcat 的 `.gitignore` 忽略，是本地运行凭据，**不进版本库**，每个 VPS 各自维护。
-
-### 6.2 续命脚本（随 image 一起，路径自动定位）
-`refresh-and-sync.sh` 与 `blackcat-chatgpt2api-bridge.js` 已经随 image 在 `/opt/image/deploy/personal/`，脚本会自动定位 `image/blackcat-relogin-dev` 子模块，**无需手改路径**。只需确认 `C2A_BASE_URL` / `C2A_AUTH_KEY` 与你部署的一致：
-```bash
-chmod +x /opt/image/deploy/personal/refresh-and-sync.sh
-# 先手动干跑一遍确认无误（save-dir 指向子模块内的 codex_relogin）：
-node /opt/image/deploy/personal/blackcat-chatgpt2api-bridge.js \
-  --save-dir /opt/image/blackcat-relogin-dev/codex_relogin \
-  --base-url https://img.example.com --auth-key <你的管理员key> --dry-run
+cd /opt/image-gen/blackcat-relogin-dev
+npm ci
+npx playwright install --with-deps chromium
+cp config.example.json config.json
+nano config.json
+nano accounts.txt
+chmod 600 config.json accounts.txt
 ```
 
-### 6.3 定时任务
-```bash
-# crontab -e ——每 6 小时刷新一次，赶在 token 过期前续上
-0 */6 * * * /opt/image/deploy/personal/refresh-and-sync.sh >> /var/log/token-refresh.log 2>&1
+推荐 Outlook 四段格式：
+
+```text
+邮箱----邮箱密码----client_id----refresh_token
 ```
 
-> 现实提醒：blackcat 的 refresh 是"完整重登需要邮箱验证码"，所以**接码通道必须稳定**（API 接码不掉线 / Outlook refresh_token 不失效），这才是自动续命能不能长期跑通的关键，而不是代码本身。
+或五/六段：
 
----
+```text
+目标邮箱----登录邮箱----邮箱密码----client_id----refresh_token[----ChatGPT登录密码]
+```
 
-## 7. 日常运维速查
+首次前台验证：
 
 ```bash
-# 看状态 / 日志
-docker compose --env-file .env.production ps
+node src/cli.js refresh \
+  --file accounts.txt \
+  --save-login-session \
+  --save-dir ./codex_relogin \
+  --config config.json \
+  --at-check-remote
+```
+
+## 9. 桥接 AT 到账号池
+
+复制 gitignored 的运行配置：
+
+```bash
+cd /opt/image-gen
+cp deploy/personal/token-refresh.env.example \
+  deploy/personal/token-refresh.env
+chmod 600 deploy/personal/token-refresh.env
+nano deploy/personal/token-refresh.env
+```
+
+内容：
+
+```env
+C2A_BASE_URL=https://img.example.com
+C2A_AUTH_KEY=<与 CHATGPT2API_AUTH_KEY 相同>
+```
+
+桥接干跑：
+
+```bash
+node deploy/personal/blackcat-chatgpt2api-bridge.js \
+  --save-dir blackcat-relogin-dev/codex_relogin \
+  --base-url https://img.example.com \
+  --auth-key '<admin-key>' \
+  --state-file deploy/personal/bridge-state.json \
+  --dry-run
+```
+
+真实刷新同步：
+
+```bash
+chmod +x deploy/personal/refresh-and-sync.sh
+./deploy/personal/refresh-and-sync.sh
+```
+
+脚本只有在删除/导入 API 返回 2xx 后才更新 `bridge-state.json`。管理员 key 不写在脚本中。
+
+### systemd timer
+
+`/etc/systemd/system/image-token-refresh.service`：
+
+```ini
+[Unit]
+Description=Refresh ChatGPT AT and sync account pool
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=<deploy-user>
+Group=<deploy-user>
+WorkingDirectory=/opt/image-gen
+ExecStart=/opt/image-gen/deploy/personal/refresh-and-sync.sh
+UMask=0077
+TimeoutStartSec=30min
+```
+
+把 `<deploy-user>` 替换为拥有 `/opt/image-gen` 的实际 Linux 用户。
+
+`/etc/systemd/system/image-token-refresh.timer`：
+
+```ini
+[Unit]
+Description=Run AT refresh every 6 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now image-token-refresh.timer
+sudo systemctl start image-token-refresh.service
+journalctl -u image-token-refresh.service -n 200 --no-pager
+```
+
+## 10. 备份与恢复演练
+
+创建并验证应用备份：
+
+```bash
+cd /opt/image-gen/chatgpt2api-bk/deploy/production
+docker compose --env-file .env.production exec -T api sh -lc \
+  'python scripts/backup_data.py create --database-url "$DATABASE_URL" --json'
+docker compose --env-file .env.production exec -T api sh -lc \
+  'python scripts/backup_data.py verify /app/data/backups/<backup>.zip --json'
+```
+
+备份还应覆盖：
+
+- PostgreSQL 数据/转储
+- MinIO/S3/R2 对象
+- `.env.production`
+- Blackcat `accounts.txt`、`config.json` 和 `codex_relogin/`
+- `token-refresh.env`、`bridge-state.json`
+
+敏感备份必须加密并同步到异机。每月至少做一次临时环境恢复演练。
+
+示例 cron（每天 03:30）：
+
+```cron
+30 3 * * * cd /opt/image-gen/chatgpt2api-bk/deploy/production && docker compose --env-file .env.production exec -T api sh -lc 'python scripts/backup_data.py create --database-url "$DATABASE_URL" --json' >> /var/log/image-gen-backup.log 2>&1
+```
+
+## 11. 日常运维
+
+```bash
+cd /opt/image-gen
+./deploy/personal/deploy.sh status
+./deploy/personal/deploy.sh logs api
+
+cd chatgpt2api-bk/deploy/production
 docker compose --env-file .env.production logs -f api
 docker compose --env-file .env.production logs -f caddy
-
-# 重启单个服务
 docker compose --env-file .env.production restart api
-
-# 更新版本（git 工作流见 §8，脚本见 §3.7）
-./deploy/personal/deploy.sh update
-
-# 磁盘 / 资源
-df -h ; docker system df
-
-# 账号池健康
-curl -s -H "Authorization: Bearer <key>" https://img.example.com/api/accounts | head
-curl -s -H "Authorization: Bearer <key>" https://img.example.com/api/admin/alerts
 ```
 
----
+至少监控：
 
-## 8. 与 git 仓库协同（提交 / 更新 / 回滚）
+- `/health/live`、`/health/ready`
+- 可用账号数和额度
+- 队列积压、dead-letter、stale running
+- 图片成功率和 SSE 超时
+- PostgreSQL、Redis、对象存储
+- 磁盘剩余与备份年龄
 
-本仓库的版本控制约定：
+## 12. 更新与回滚
 
-- ✅ **可提交**：源码、`deploy/production/*.example`、`deploy/production/docker-compose.yml`/`Caddyfile`/`README.md`、本目录 `deploy/personal/` 下的全部文件（`.env.personal.example` 仅为占位符）、父仓库 `README.md` / `.gitmodules`。
-- ❌ **不提交**（已被 `.gitignore` 忽略）：`.env.production`（真实密钥）、`bridge-state.json`（运行时生成的映射）、`accounts.txt` / blackcat 的 `config.json`（运行凭据）、`chatgpt2api-bk/config.json`（真实 auth-key，已 `assume-unchanged`）。
+更新：
 
-常规更新流程（开发机）：
 ```bash
-# 改完代码后
-git status                              # 确认只有预期文件变更
-git add -A
-git commit -m "feat: 更新 xxx"
-git push                               # 推到你的远端
-
-# 若改的是 bk 子模块，进入子模块再 push：
-cd chatgpt2api-bk && git add -A && git commit -m "..." && git push
-# 父仓库记录新的子模块指针：
-cd .. && git add chatgpt2api-bk && git commit -m "bump bk" && git push
-
-# 若改的是 blackcat 子模块（自动补号/重登逻辑）：
-cd blackcat-relogin-dev && git add -A && git commit -m "..." && git push
-cd .. && git add blackcat-relogin-dev && git commit -m "bump blackcat" && git push
+cd /opt/image-gen
+./deploy/personal/deploy.sh update
 ```
 
-服务器更新（见 §3.7）：`./deploy/personal/deploy.sh update`
+脚本使用父仓库锁定的子模块提交。开发机必须先提交/推送子仓库，再提交父仓库指针。
 
 回滚：
+
 ```bash
-git log --oneline | head          # 找到上一个好版本 <commit>
-git checkout <commit>
-./deploy/personal/deploy.sh update  # 用旧镜像重建
+cd /opt/image-gen
+git log --oneline -10
+git checkout <known-good-parent-commit>
+git submodule sync --recursive
+git submodule update --init --recursive
+./deploy/personal/deploy.sh deploy
 ```
 
----
+如果数据库迁移不向后兼容，恢复对应版本备份；不要只回滚容器代码。
 
-## 9. 常见坑
+## 13. 可选项目
 
-- **Caddy 拿不到证书**：80/443 没放行，或域名没解析到本机 IP。先 `dig img.example.com` 确认。
-- **api 一直 unhealthy**：多半是 `DATABASE_URL` 密码与 `POSTGRES_PASSWORD` 不一致，或没跑 §3.4 迁移。
-- **图片能生成但打不开**：`OBJECT_STORAGE_PUBLIC_BASE_URL` 配错，或 MinIO 桶没设公共读（compose 的 minio-init 会设，检查它是否 completed）。
-- **账号池老是"限流/异常"**：token 过期没续命（配 §6），或账号本身额度用尽——限流会自动轮到下一个可用账号。
-- **别把 5432/6379/9000 映射到公网**：个人版保持内网 expose，只暴露 Caddy 的 80/443。
-- **bridge-state.json 误提交**：已加进 `.gitignore`；若已误加，执行 `git rm --cached deploy/personal/bridge-state.json`。
-- **服务器跑的是上游干净版（不含二开）**：忘了 §2 的 Fork + 子模块指向 fork。检查 `git -C chatgpt2api-bk remote -v` 是否指向你的 fork；不是就重做 §2③ 或部署时带 `BK_FORK_URL`。
-- **blackcat 子模块是空的**：`git submodule status` 里 `blackcat-relogin-dev` 前面是 `-` 说明没拉到。先确认 GitHub 上 `wujiangcai/re-login` 已创建且已 push，再运行 `git submodule update --init --remote blackcat-relogin-dev`。
-- **本地改了 bk 但没生效**：`config.json` 被 `assume-unchanged` 保护，改它不会进提交；改源码（`api/`、`services/`、`web/`）才会随 `git push` + `deploy.sh update` 上服务器。
+- `image-gen-demo`：独立部署见 [`image-gen-demo/DEPLOY.md`](../../image-gen-demo/DEPLOY.md)。
+- `chat2api`：独立 Chat Completions/图片工具链见 [`chat2api/docs/DEPLOYMENT.md`](../../chat2api/docs/DEPLOYMENT.md)。
 
----
+两者不是主后端生产 Compose 的必需服务。
 
-## 10. 可选：用 image-gen-demo 作公开前端（需改 compose）
+## 14. 常见故障
 
-如果你想要一个更友好的对外页面（暴露 8080），可以用 `image-gen-demo` 包住 bk。**但它的默认 compose 拉的是上游镜像，不会用你的二开**，必须改成 build 你的 fork：
-
-```yaml
-# image-gen-demo/docker-compose.yml 修改 chatgpt2api 服务：
-services:
-  chatgpt2api:
-    build:
-      context: ../chatgpt2api-bk      # 改用你的子模块源码，而非 ghcr.io 上游镜像
-      dockerfile: Dockerfile
-    image: chatgpt2api:local
-    container_name: chatgpt2api
-    restart: unless-stopped
-    volumes:
-      - ./c2a-data:/app/data
-      - ./c2a-config.json:/app/config.json:ro
-    environment:
-      - STORAGE_BACKEND=json
-      - CHATGPT2API_AUTH_KEY=${C2A_KEY}
-```
-其余 image-gen-demo 的环境变量（`C2A_BASE=http://chatgpt2api:80`、`C2A_KEY`、`IMAGE_API_BASE=http://chatgpt2api:80/v1/images`）不变。这样公开页就用上了你的二开后端。
-
-> 个人/小圈子用，直接部署 §3 的 bk 就够了，不必折腾这一节。
+- 子模块目录为空：运行 `git submodule sync --recursive && git submodule update --init --recursive`。
+- Caddy 无证书：检查 DNS、80/443、防火墙与 `ACME_EMAIL`。
+- API unhealthy：检查 `DATABASE_URL`、Redis、迁移状态和对象存储。
+- 图片卡住：检查代理、账号额度和 `IMAGE_SSE_TIMEOUT_SECONDS`。
+- 容器连不上宿主机代理：不要使用容器内 `127.0.0.1`。
+- AT 不刷新：检查 Outlook refresh token、IMAP/Graph 权限、代理和 Playwright Chrome。
+- 桥接 401：`C2A_AUTH_KEY` 与生产管理员 key 不一致。
+- 更新后版本不对：检查父仓库子模块指针，不要使用 `submodule update --remote`。
