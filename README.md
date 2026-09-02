@@ -79,7 +79,121 @@ git submodule update --init --recursive
 - `/healthz` 本地运行冒烟通过。
 - 使用目标账号 AT 和本地 `127.0.0.1:7897` 代理，真实图片 Chat Completions 请求返回 HTTP 200 与 Markdown 图片链接。
 
-## 4. 本地测试门禁
+## 4. API 接口与客户端接入规范
+
+`chatgpt2api-bk` 对外提供标准 OpenAI 兼容接口，支持文生图、图生图（参考图垫图/修图）以及对话生图。
+
+### 4.1 普号 AT 账号池特性
+* **自动状态与冷却检测**：普号（Free）导入后，未知配额时默认进入可用池；配额耗尽后标记为「限流」并记录 `restore_at`，冷却时间到达后自动恢复可用。
+* **单请求静默故障转移 (Failover)**：当某个普号遭遇 `429 (Rate Limit)`、限流或网络抖动时，服务端会在单次请求内部自动轮换至下一个可用普号进行重试（最多重试 3~5 次），无需下游客户端重发。
+* **失效 Token 自动移除**：若账号 AT 过期被踢（`token_invalidated`），系统自动剔除失效 Token 并换号重试。
+
+### 4.2 文生图 (Text-to-Image)
+* **接口**：`POST /v1/images/generations`
+* **Header**：`Authorization: Bearer <sk-app-xxx>`
+* **请求体 (JSON)**：
+  ```json
+  {
+    "model": "gpt-image-2",
+    "prompt": "一只可爱的布偶猫坐在窗台，阳光洒在毛发上，高清写实摄影",
+    "n": 1,
+    "size": "1024x1024",
+    "response_format": "b64_json"
+  }
+  ```
+* **响应**：标准 OpenAI 格式，返回 `b64_json` 图像数据或 `url`。
+
+### 4.3 图生图 / 垫图修改 (Image-to-Image / Edits)
+* **接口**：`POST /v1/images/edits`
+* **Header**：`Authorization: Bearer <sk-app-xxx>`
+* **请求体 (Multipart Form)**：
+  * `image`: 参考图文件流（支持单张或多张）
+  * `prompt`: 垫图修改提示词（如：“参考输入图片，保持人物主体和画风不变，将其置于赛博朋克夜景街道”）
+  * `model`: `gpt-image-2`
+  * `n`: `1`
+  * `size`: `1024x1024`（可选）
+  * `response_format`: `b64_json`（或 `url`）
+
+### 4.4 下游客户端对接示例
+
+#### 示例 1：在 `viskit-studio` 中接入
+在 `viskit-studio` 的配置（`config.yaml` 或界面设置）中填入：
+```yaml
+providers:
+  image:
+    protocol: image_generation
+    adapter: chatgpt2api
+    base_url: https://你的远端服务域名
+    api_key_env: CHATGPT2API_KEY
+    model: gpt-image-2
+```
+同时在启动环境设置环境变量：
+```bash
+CHATGPT2API_KEY=sk-app-xxxx
+```
+
+#### 示例 2：Python OpenAI SDK 调用
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://你的远端服务域名/v1",
+    api_key="sk-app-xxxx",
+)
+
+# 文生图
+response = client.images.generate(
+    model="gpt-image-2",
+    prompt="一只在草地上奔跑的金毛犬，写实摄影",
+    n=1,
+    response_format="b64_json",
+)
+image_b64 = response.data[0].b64_json
+
+# 图生图 / 垫图
+with open("reference.png", "rb") as f:
+    edit_res = client.images.edit(
+        image=f,
+        model="gpt-image-2",
+        prompt="保持主体构图不变，转换为水彩画风格",
+        n=1,
+        response_format="b64_json",
+    )
+```
+
+#### 示例 3：cURL 快速测试
+```bash
+# 文生图
+curl -X POST https://你的远端服务域名/v1/images/generations \
+  -H "Authorization: Bearer sk-app-xxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-image-2",
+    "prompt": "一只可爱的橘猫",
+    "n": 1,
+    "response_format": "b64_json"
+  }'
+
+# 图生图 (Multipart Form)
+curl -X POST https://你的远端服务域名/v1/images/edits \
+  -H "Authorization: Bearer sk-app-xxxx" \
+  -F "image=@cat.png" \
+  -F "prompt=把背景换成雪山" \
+  -F "model=gpt-image-2" \
+  -F "response_format=b64_json"
+```
+
+### 4.5 用户分发管理 (User Key)
+在生产环境中，**不要直接分发管理员 Key (`CHATGPT2API_AUTH_KEY`)**。
+1. 登录 Web 管理后台（`https://你的域名/login`）。
+2. 在 **用户管理 / 凭据管理** 中创建独立的 `User Key`（格式为 `sk-app-*`）。
+3. 支持针对每个 Key 独立配置：
+   * **功能权限**：文生图 (`image.generate`)、图生图 (`image.edit`)、对话 (`chat.completions`)；
+   * **额度上限**：限制最大生图次数；
+   * **速率限制**：配置每分钟请求上限 (RPM)；
+   * **过期时间**：支持设定有效截止期。
+
+## 5. 本地测试门禁
 
 ### Blackcat
 
@@ -130,7 +244,7 @@ node --test deploy/personal/test-bridge.js
 node --check deploy/personal/blackcat-chatgpt2api-bridge.js
 ```
 
-## 5. 推荐服务器部署
+## 6. 推荐服务器部署
 
 详细步骤见 [`deploy/personal/README.md`](deploy/personal/README.md)。最短流程：
 
@@ -152,7 +266,7 @@ cp deploy/personal/.env.personal.example \
 - Caddy HTTPS
 - 数据库迁移、健康/就绪探针、指标、告警、备份与上线证据
 
-## 6. 代理
+## 7. 代理
 
 - `blackcat-relogin-dev/config.json` 的 `proxy`：用于重登、Outlook 和 Playwright。
 - `chatgpt2api-bk`：在管理后台设置全局代理；容器网络说明见其运维手册。
@@ -161,7 +275,7 @@ cp deploy/personal/.env.personal.example \
 
 容器内 `127.0.0.1` 指向容器自身。宿主机代理应使用容器可达地址、`host.docker.internal`（平台支持时）或同一 Compose 网络中的服务名。本机验证使用的代理端口是 `127.0.0.1:7897`，服务器需按实际代理重新配置。
 
-## 7. AT 自动刷新与同步
+## 8. AT 自动刷新与同步
 
 1. 在 `blackcat-relogin-dev` 创建 gitignored 的 `accounts.txt`、`config.json`。
 2. 复制刷新环境模板：
@@ -182,7 +296,7 @@ chmod 600 deploy/personal/token-refresh.env
 
 桥接逻辑会按邮箱记录上次导入 AT，先删除变化前的旧 Token，再导入新 Token；仅在后台 API 返回 2xx 后更新 `bridge-state.json`。
 
-## 8. 数据与密钥
+## 9. 数据与密钥
 
 以下内容不得提交：
 
@@ -194,7 +308,7 @@ chmod 600 deploy/personal/token-refresh.env
 
 运行文件均已加入父仓库或子仓库 `.gitignore`。示例文件只能保留占位符。
 
-## 9. 更新与回滚
+## 10. 更新与回滚
 
 开发机先在各子仓库提交并推送，再提交父仓库子模块指针：
 
@@ -225,7 +339,7 @@ git submodule update --init --recursive
 
 父提交同时锁定四个组件版本，可完整复现。
 
-## 10. 文档索引
+## 11. 文档索引
 
 - [个人生产部署总指南](deploy/personal/README.md)
 - [商业化设计与进度](COMMERCIALIZATION_DESIGN.md)

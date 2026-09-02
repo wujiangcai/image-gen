@@ -45,6 +45,7 @@ logs/
 *.log
 data/
 c2a-data/
+test_generated_images/
 *.db
 *.sqlite
 *.sqlite3

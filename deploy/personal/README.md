@@ -190,7 +190,52 @@ python scripts/verify_production_deployment.py \
   --upload-evidence
 ```
 
-## 8. Blackcat 账号配置
+## 8. 对外 API 授权与下游客户端对接
+
+生产环境中切勿向外部用户或下游应用泄露 `CHATGPT2API_AUTH_KEY`（管理员密钥）。应通过管理后台创建独立 `User Key`。
+
+### 8.1 创建 User Key
+1. 登录 Web 管理后台（`https://img.example.com`）。
+2. 进入 **用户管理** -> **创建 Key**。
+3. 可配置：
+   * **名称/备注**：如 `viskit-studio-prod`；
+   * **功能权限**：勾选 `image.generate`（文生图）、`image.edit`（图生图）；
+   * **额度配额**：如限制总生图 100 张；
+   * **RPM 速率**：如限制 5 次/分钟；
+   * **过期时间**：可选。
+4. 生成形如 `sk-app-xxxxxxxxxxxx` 的令牌提供给下游。
+
+### 8.2 对接 viskit-studio
+在 `viskit-studio` 的配置（`config.yaml` 或界面设置）中配置：
+```yaml
+providers:
+  image:
+    protocol: image_generation
+    adapter: chatgpt2api
+    base_url: https://img.example.com
+    api_key_env: CHATGPT2API_KEY
+    model: gpt-image-2
+```
+并在运行环境中设置 `CHATGPT2API_KEY=sk-app-xxxxxxxxxxxx`。
+
+### 8.3 接口快速冒烟验证
+```bash
+# 验证文生图
+curl -X POST https://img.example.com/v1/images/generations \
+  -H "Authorization: Bearer sk-app-xxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"一只在草地上的橘猫","n":1,"response_format":"b64_json"}'
+
+# 验证图生图
+curl -X POST https://img.example.com/v1/images/edits \
+  -H "Authorization: Bearer sk-app-xxxx" \
+  -F "image=@cat.png" \
+  -F "prompt=换成雪地背景" \
+  -F "model=gpt-image-2" \
+  -F "response_format=b64_json"
+```
+
+## 9. Blackcat 账号配置
 
 ```bash
 cd /opt/image-gen/blackcat-relogin-dev
@@ -225,7 +270,7 @@ node src/cli.js refresh \
   --at-check-remote
 ```
 
-## 9. 桥接 AT 到账号池
+## 10. 桥接 AT 到账号池
 
 复制 gitignored 的运行配置：
 
@@ -309,7 +354,7 @@ sudo systemctl start image-token-refresh.service
 journalctl -u image-token-refresh.service -n 200 --no-pager
 ```
 
-## 10. 备份与恢复演练
+## 11. 备份与恢复演练
 
 创建并验证应用备份：
 
@@ -337,7 +382,7 @@ docker compose --env-file .env.production exec -T api sh -lc \
 30 3 * * * cd /opt/image-gen/chatgpt2api-bk/deploy/production && docker compose --env-file .env.production exec -T api sh -lc 'python scripts/backup_data.py create --database-url "$DATABASE_URL" --json' >> /var/log/image-gen-backup.log 2>&1
 ```
 
-## 11. 日常运维
+## 12. 日常运维
 
 ```bash
 cd /opt/image-gen
@@ -359,7 +404,7 @@ docker compose --env-file .env.production restart api
 - PostgreSQL、Redis、对象存储
 - 磁盘剩余与备份年龄
 
-## 12. 更新与回滚
+## 13. 更新与回滚
 
 更新：
 
@@ -383,14 +428,14 @@ git submodule update --init --recursive
 
 如果数据库迁移不向后兼容，恢复对应版本备份；不要只回滚容器代码。
 
-## 13. 可选项目
+## 14. 可选项目
 
 - `image-gen-demo`：独立部署见 [`image-gen-demo/DEPLOY.md`](../../image-gen-demo/DEPLOY.md)。
 - `chat2api`：独立 Chat Completions/图片工具链见 [`chat2api/docs/DEPLOYMENT.md`](../../chat2api/docs/DEPLOYMENT.md)。
 
 两者不是主后端生产 Compose 的必需服务。
 
-## 14. 常见故障
+## 15. 常见故障
 
 - 子模块目录为空：运行 `git submodule sync --recursive && git submodule update --init --recursive`。
 - Caddy 无证书：检查 DNS、80/443、防火墙与 `ACME_EMAIL`。
