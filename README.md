@@ -89,6 +89,7 @@ git submodule update --init --recursive
 * **失效 Token 自动移除**：若账号 AT 过期被踢（`token_invalidated`），系统自动剔除失效 Token 并换号重试。
 * **调度禁用**：连续失败达到阈值会把该号标为 `disabled`（状态仍可能显示「正常」），号池页可单独/批量启用或「一键恢复禁用账号」。自动禁用不会关掉最后一个可用号。
 * **图片缓存**：生成图同时落在 `data/images` 与 `data/assets`。图片管理页可查看占用、删除单张/所选、按保留天数清理或清空缓存；设置里的保留天数对两处都生效。
+* **生图并发**：设置页「生图并发路数」控制上游同时画几张（默认 2，最大 8）。1GB 内存建议 2～3。只加大 Viskit 并发不会变快。
 
 域名走 Cloudflare 时，同步等待出图会在约 100 秒被切断（HTTP 524），但 origin 往往已经把图画完。生产客户端应使用异步任务，详见 `chatgpt2api-bk/docs/ASYNC-IMAGE-TASKS.md`。
 
