@@ -88,10 +88,12 @@ git submodule update --init --recursive
 * **单请求静默故障转移 (Failover)**：当某个普号遭遇 `429 (Rate Limit)`、限流或网络抖动时，服务端会在单次请求内部自动轮换至下一个可用普号进行重试（最多重试 3~5 次），无需下游客户端重发。
 * **失效 Token 自动移除**：若账号 AT 过期被踢（`token_invalidated`），系统自动剔除失效 Token 并换号重试。
 
+域名走 Cloudflare 时，同步等待出图会在约 100 秒被切断（HTTP 524），但 origin 往往已经把图画完。生产客户端应使用异步任务，详见 `chatgpt2api-bk/docs/ASYNC-IMAGE-TASKS.md`。
+
 ### 4.2 文生图 (Text-to-Image)
 * **接口**：`POST /v1/images/generations`
 * **Header**：`Authorization: Bearer <sk-app-xxx>`
-* **请求体 (JSON)**：
+* **同步请求体 (JSON)**：
   ```json
   {
     "model": "gpt-image-2",
@@ -101,7 +103,8 @@ git submodule update --init --recursive
     "response_format": "b64_json"
   }
   ```
-* **响应**：标准 OpenAI 格式，返回 `b64_json` 图像数据或 `url`。
+* **异步（推荐，穿过 Cloudflare）**：同样的 JSON 加上 `"async": true`，或请求头 `Prefer: respond-async`。立即 **202** `{"task_id":"job_...","status":"submitted"}`，再 `GET /v1/tasks/{task_id}` 直到 `completed`。
+* **同步响应**：标准 OpenAI 格式，返回 `b64_json` 或 `url`。
 
 ### 4.3 图生图 / 垫图修改 (Image-to-Image / Edits)
 * **接口**：`POST /v1/images/edits`
@@ -113,24 +116,22 @@ git submodule update --init --recursive
   * `n`: `1`
   * `size`: `1024x1024`（可选）
   * `response_format`: `b64_json`（或 `url`）
+  * `async`: `true`（推荐；立即返回 `task_id`，避免 Cloudflare 524）
+* **查询任务**：`GET /v1/tasks/{task_id}`，状态为 `submitted` / `processing` / `completed` / `failed`。
 
 ### 4.4 下游客户端对接示例
 
 #### 示例 1：在 `viskit-studio` 中接入
-在 `viskit-studio` 的配置（`config.yaml` 或界面设置）中填入：
+`viskit-studio` 的图片角色走 `openai_compatible` 适配器（不是 `image_generation` / `chatgpt2api` adapter）。在 `data/config.yaml` 或设置页填入：
 ```yaml
 providers:
   image:
-    protocol: image_generation
-    adapter: chatgpt2api
-    base_url: https://你的远端服务域名
-    api_key_env: CHATGPT2API_KEY
+    protocol: openai_compatible
+    base_url: https://img.nodelite.top
+    api_key_env: VISKIT_IMAGE_IMAGE
     model: gpt-image-2
 ```
-同时在启动环境设置环境变量：
-```bash
-CHATGPT2API_KEY=sk-app-xxxx
-```
+适配器会给 `/v1/images/edits` 和 `/v1/images/generations` 带上 `async=true` 与 `Prefer: respond-async`，再轮询 `GET /v1/tasks/{task_id}`（最长 360 秒）。遇到 Cloudflare 524 不会立刻重打同一张图。详见 viskit 仓 `docs/image-provider-async.md`。
 
 #### 示例 2：Python OpenAI SDK 调用
 ```python
@@ -174,13 +175,18 @@ curl -X POST https://你的远端服务域名/v1/images/generations \
     "response_format": "b64_json"
   }'
 
-# 图生图 (Multipart Form)
+# 图生图（异步，推荐）
 curl -X POST https://你的远端服务域名/v1/images/edits \
   -H "Authorization: Bearer sk-app-xxxx" \
+  -H "Prefer: respond-async" \
   -F "image=@cat.png" \
   -F "prompt=把背景换成雪山" \
   -F "model=gpt-image-2" \
-  -F "response_format=b64_json"
+  -F "async=true"
+
+# 轮询任务
+curl -H "Authorization: Bearer sk-app-xxxx" \
+  https://你的远端服务域名/v1/tasks/job_xxxxxxxx
 ```
 
 ### 4.5 用户分发管理 (User Key)

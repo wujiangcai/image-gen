@@ -4,11 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Workspace overview
 
-This directory is not itself a git repository. It contains three related projects:
+This directory **is** the `image-gen` parent git repository (submodules: `chatgpt2api-bk`, `image-gen-demo`, `blackcat-relogin-dev`, `chat2api`). Production image API is `chatgpt2api-bk` behind Cloudflare at `img.nodelite.top`.
 
-- `image-gen-demo/`: the active lightweight FastAPI image-generation frontend/proxy used to expose a browser UI, user/admin keys, and a hidden upstream API key.
-- `chatgpt2api-bk/`: the main `basketikun/chatgpt2api` service: FastAPI backend plus a Next.js management/image UI, account pool management, image API compatibility, and multiple storage backends.
-- `chat2api/`: an upstream/legacy `LanQian528/chat2api` checkout. Treat it as reference unless the user explicitly asks to work there.
+Long image generations must use async tasks (`async=true` / `Prefer: respond-async` then `GET /v1/tasks/{id}`). Sync `/v1/images/edits` through Cloudflare returns HTTP 524 while the origin still finishes the image. See `chatgpt2api-bk/docs/ASYNC-IMAGE-TASKS.md`.
+
+It contains four related projects:
+
+- `chatgpt2api-bk/`: production OpenAI-compatible image API, account pool, async jobs, admin UI. Deployed as `chatgpt2api-native` on Lightsail (`img.nodelite.top`).
+- `image-gen-demo/`: lightweight FastAPI portal/proxy (optional, not the current production backend).
+- `blackcat-relogin-dev/`: Outlook/API relogin and AT refresh for the account pool.
+- `chat2api/`: legacy Chat Completions proxy. Treat as reference unless the user explicitly asks to work there.
 
 ## Common commands
 
