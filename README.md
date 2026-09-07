@@ -88,6 +88,7 @@ git submodule update --init --recursive
 * **单请求静默故障转移 (Failover)**：当某个普号遭遇 `429 (Rate Limit)`、限流或网络抖动时，服务端会在单次请求内部自动轮换至下一个可用普号进行重试（最多重试 3~5 次），无需下游客户端重发。
 * **失效 Token 自动移除**：若账号 AT 过期被踢（`token_invalidated`），系统自动剔除失效 Token 并换号重试。
 * **调度禁用**：连续失败达到阈值会把该号标为 `disabled`（状态仍可能显示「正常」），号池页可单独/批量启用或「一键恢复禁用账号」。自动禁用不会关掉最后一个可用号。
+* **图片缓存**：生成图同时落在 `data/images` 与 `data/assets`。图片管理页可查看占用、删除单张/所选、按保留天数清理或清空缓存；设置里的保留天数对两处都生效。
 
 域名走 Cloudflare 时，同步等待出图会在约 100 秒被切断（HTTP 524），但 origin 往往已经把图画完。生产客户端应使用异步任务，详见 `chatgpt2api-bk/docs/ASYNC-IMAGE-TASKS.md`。
 
